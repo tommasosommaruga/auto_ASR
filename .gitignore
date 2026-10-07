@@ -1,0 +1,13 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+models/
+upload_sessions/
+certs/
+settings.json
+library/
+.DS_Store
+android/.gradle/
+android/**/build/
+android/local.properties
