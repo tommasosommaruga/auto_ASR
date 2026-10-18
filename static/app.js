@@ -65,6 +65,98 @@ const dialogList = document.querySelector("#dialog-list");
 const dialogActions = document.querySelector("#dialog-actions");
 const dialogCancel = document.querySelector("#dialog-cancel");
 const dialogConfirm = document.querySelector("#dialog-confirm");
+const stageStrip = document.querySelector("#stage-strip");
+const stageLabel = document.querySelector("#stage-label");
+const libraryJobBanner = document.querySelector("#library-job-banner");
+const detailStage = document.querySelector("#detail-stage");
+
+const feedbackState = {
+  recording: false,
+  saving: false,
+  failed: false,
+  failMessage: "",
+  activityActive: false,
+  // True while a client job fetch is in flight (bridges /api/activity clear).
+  clientJobActive: false,
+  activityPhase: "",
+  activityLabel: "",
+  received: 0,
+  total: 0,
+  itemPending: null,
+  hasTranscript: false,
+};
+
+function setFeedback(partial) {
+  Object.assign(feedbackState, partial || {});
+  paintFeedback();
+}
+
+function paintFeedback() {
+  const out = StageModel.resolve(feedbackState);
+  if (stageStrip) {
+    for (const step of stageStrip.querySelectorAll("[data-flow]")) {
+      step.classList.toggle("is-current", step.getAttribute("data-flow") === out.flow);
+    }
+  }
+  if (stageLabel) {
+    const showLabel = out.flow !== "idle" || out.item === "failed";
+    stageLabel.textContent = showLabel ? out.label : "";
+  }
+
+  const onDetail = document.body.classList.contains("is-detail");
+  const box = onDetail ? detailProgress : jobProgress;
+  const track = onDetail ? detailTrack : jobTrack;
+  const bar = onDetail ? detailBar : jobBar;
+  const labelEl = onDetail ? detailProgressLabel : jobProgressLabel;
+  const otherBox = onDetail ? jobProgress : detailProgress;
+  const otherTrack = onDetail ? jobTrack : detailTrack;
+  const otherBar = onDetail ? jobBar : detailBar;
+  if (otherBox && otherBar && otherTrack) {
+    hideProgress(otherBox, otherBar, otherTrack, { clearCancel: false });
+  }
+
+  if (out.progress.mode === "hidden") {
+    if (box && bar && track) hideProgress(box, bar, track);
+    document.body.classList.remove("is-downloading");
+  } else if (box && bar && track && labelEl) {
+    box.hidden = false;
+    document.body.classList.add("is-downloading");
+    labelEl.textContent = out.progress.text;
+    if (out.progress.mode === "determinate") {
+      const percent = Math.round(out.progress.ratio * 100);
+      bar.style.width = `${percent}%`;
+      bar.classList.remove("is-unknown");
+      track.setAttribute("aria-valuenow", String(percent));
+    } else {
+      bar.style.width = "";
+      bar.classList.add("is-unknown");
+      track.setAttribute("aria-valuenow", "0");
+    }
+  }
+
+  if (libraryJobBanner) {
+    const show = !onDetail && out.flow === "working";
+    libraryJobBanner.hidden = !show;
+    libraryJobBanner.textContent = show ? out.label : "";
+  }
+  if (detailStage) {
+    if (out.item === "failed") detailStage.textContent = out.label;
+    else if (out.flow === "working") detailStage.textContent = out.label;
+    else if (out.item === "pending") {
+      detailStage.textContent = feedbackState.itemPending === true
+        ? "Pending — audio saved. Tap Transcribe when ready."
+        : (out.label || "Pending — no speech found, audio kept");
+    } else if (out.item === "ready") detailStage.textContent = "Ready";
+    else detailStage.textContent = "";
+  }
+
+  // Stage chrome owns recording, saving, working, and failed. Leave idle
+  // status lines (copy, settings, cancel) alone.
+  if (out.flow !== "idle" || out.item === "failed") {
+    if (!onDetail && jobStatus) jobStatus.textContent = "";
+    else if (detailStatus) detailStatus.textContent = "";
+  }
+}
 
 let presets = [];
 let recorder = null;
@@ -432,21 +524,34 @@ function renderRecording(item) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "recording";
+  const awaitingTranscript = Boolean(item.pending || item.status === "pending");
+  // Empty preview after a finished job = no usable transcript → Pending badge.
+  const noSpeech = !awaitingTranscript && !String(item.preview || "").trim();
+  const pending = awaitingTranscript || noSpeech;
+
+  const head = document.createElement("div");
+  head.className = "recording-head";
   const title = document.createElement("span");
   title.className = "recording-title";
   title.textContent = item.title;
+  const badge = document.createElement("span");
+  badge.className = `recording-badge ${pending ? "is-pending" : "is-ready"}`;
+  badge.textContent = pending ? "Pending" : "Ready";
+  head.append(title, badge);
+
   const meta = document.createElement("span");
   meta.className = "recording-meta";
-  const pending = Boolean(item.pending || item.status === "pending");
-  meta.textContent = pending
-    ? `${clockTime(item.created_at)} · Not transcribed yet`
+  meta.textContent = awaitingTranscript
+    ? `${clockTime(item.created_at)} · Audio saved`
     : `${clockTime(item.created_at)} · ${formatTime(item.duration)} · ${peopleLabel(item.speaker_count)} · ${pairLabel(item)}`;
+
   const preview = document.createElement("span");
   preview.className = "recording-preview";
-  preview.textContent = pending
-    ? "Uploaded — open and tap Transcribe when ready"
+  preview.textContent = awaitingTranscript
+    ? "Open and tap Transcribe when ready"
     : (item.preview || "No speech found — audio kept");
-  button.append(title, meta, preview);
+
+  button.append(head, meta, preview);
   button.addEventListener("click", () => openRecording(item.id));
   return button;
 }
@@ -471,6 +576,7 @@ async function openRecording(recordingId) {
   document.body.classList.add("is-detail");
   settingsSheet.hidden = true;
   openSettings.textContent = "Settings";
+  paintFeedback();
 }
 
 function applyRecordingPayload(payload) {
@@ -510,15 +616,26 @@ function applyRecordingPayload(payload) {
     ? `${dayLabel(payload.created_at)} · ${clockTime(payload.created_at)} · Not transcribed yet`
     : `${dayLabel(payload.created_at)} · ${clockTime(payload.created_at)} · ${formatTime(payload.duration)} · ${pairLabel(payload)} · ${payload.model}`;
   refreshPlayerSource();
-  detailStatus.textContent = pending
-    ? "Audio is saved on this computer. Tap Transcribe when you want to run it."
-    : "";
+  detailStatus.textContent = "";
   speakerNames.clear();
   for (const [speaker, name] of Object.entries(payload.speaker_names || {})) {
     speakerNames.set(Number(speaker), name);
   }
   renderTranscript(payload);
+  const transcriptTurns = payload.turns || payload.segments || [];
+  setFeedback({
+    itemPending: Boolean(recordingPending),
+    hasTranscript: Boolean(transcriptTurns.length),
+    failed: false,
+    failMessage: "",
+  });
   updateDetailMixerActions();
+  // Paint the original waveform immediately; filter preview updates colors later.
+  requestAnimationFrame(() => {
+    const plane = mixerViews.get("detail")?.els.plane;
+    if (plane) plane.redraw();
+    paintDetailOriginalPlane();
+  });
   scheduleDetailClean();
 }
 
@@ -537,10 +654,14 @@ function clearPreview() {
 
 function showLibrary() {
   player.pause();
+  detailPlaneToken += 1;
   detailView.hidden = true;
   libraryView.hidden = false;
   dock.hidden = false;
   document.body.classList.remove("is-detail");
+  setFeedback({ itemPending: null, hasTranscript: false });
+  const detailPlane = mixerViews.get("detail")?.els.plane;
+  if (detailPlane) detailPlane.idle();
   loadLibrary(searchInput.value);
 }
 
@@ -589,8 +710,6 @@ async function persistDetail() {
 }
 
 async function acceptAudio(file, filename) {
-  const sizeLabel = formatBytes(file.size || 0);
-  jobStatus.textContent = `Selected ${filename || "audio"} (${sizeLabel}). Uploading…`;
   // Models are only needed when the user taps Transcribe later.
   transcribeBlob(file, filename);
 }
@@ -658,6 +777,14 @@ async function startRecording() {
       stopTimer();
       const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
       const extension = blob.type.includes("mp4") ? "m4a" : "webm";
+      setFeedback({
+        recording: false,
+        saving: true,
+        failed: false,
+        failMessage: "",
+        received: 0,
+        total: 0,
+      });
       transcribeBlob(blob, `recording.${extension}`);
     });
     recorder.start();
@@ -667,9 +794,11 @@ async function startRecording() {
     startedAt = Date.now();
     tick();
     timerId = window.setInterval(tick, 500);
+    setFeedback({ recording: true, failed: false, failMessage: "" });
     await requestWakeLock();
   } catch (_error) {
     document.body.classList.remove("is-recording");
+    setFeedback({ recording: false });
     if (liveMicStream) liveMicStream.getTracks().forEach((track) => track.stop());
     liveMicStream = null;
     if (liveMixer) {
@@ -722,30 +851,54 @@ async function transcribeBlob(blob, filename) {
   activeUploadId = "";
   setCancelUploadVisible(true);
   await requestWakeLock();
-  const sizeLabel = formatBytes(blob.size || 0);
-  jobStatus.textContent = `Starting upload (${sizeLabel})…`;
   showClientProgress(0, blob.size || 0, "Uploading");
   try {
     const payload = blob.size > 256 * 1024
       ? await uploadChunkedToLibrary(blob, filename)
       : await uploadToLibrary(blob, filename);
     throwIfUploadCancelled();
-    jobStatus.textContent = "";
-    hideProgress(jobProgress, jobBar, jobTrack);
     setCancelUploadVisible(false);
-    document.body.classList.remove("is-downloading");
+    setFeedback({
+      saving: false,
+      itemPending: true,
+      hasTranscript: false,
+      failed: false,
+      failMessage: "",
+      activityActive: false,
+      activityPhase: "",
+      activityLabel: "",
+      received: 0,
+      total: 0,
+    });
     searchInput.value = "";
     await openRecording(payload.id);
   } catch (error) {
-    jobStatus.textContent = "";
-    hideProgress(jobProgress, jobBar, jobTrack);
     setCancelUploadVisible(false);
-    document.body.classList.remove("is-downloading");
     if (error && error.name === "AbortError") {
+      setFeedback({
+        saving: false,
+        failed: false,
+        failMessage: "",
+        activityActive: false,
+        activityPhase: "",
+        activityLabel: "",
+        received: 0,
+        total: 0,
+      });
       jobStatus.textContent = "Upload cancelled. Already sent parts are kept if you retry the same file.";
       return;
     }
     const lost = error && error.name === "NetworkError";
+    setFeedback({
+      saving: false,
+      failed: true,
+      failMessage: (error && error.message) || "Upload failed — try again",
+      activityActive: false,
+      activityPhase: "",
+      activityLabel: "",
+      received: 0,
+      total: 0,
+    });
     await ask({
       title: "Upload did not finish",
       body: lost
@@ -779,7 +932,6 @@ function cancelActiveUpload() {
     }
   }
   // Keep uploaded chunks on disk for resume; only abort the in-flight request.
-  jobProgressLabel.textContent = "Cancelling…";
 }
 
 function throwIfUploadCancelled() {
@@ -812,26 +964,19 @@ function showClientProgress(loaded, total, label, force) {
     window.clearTimeout(showClientProgress._timer);
     showClientProgress._timer = 0;
   }
-  jobProgress.hidden = false;
-  document.body.classList.add("is-downloading");
   if (cancelUploadButton && !uploadCancelled) cancelUploadButton.hidden = false;
   const safeTotal = Number(total) || 0;
   const safeLoaded = Number(loaded) || 0;
-  if (safeTotal > 0) {
-    const ratio = Math.max(0, Math.min(1, safeLoaded / safeTotal));
-    const percent = Math.round(ratio * 100);
-    jobBar.style.width = `${percent}%`;
-    jobBar.classList.remove("is-unknown");
-    jobTrack.setAttribute("aria-valuenow", String(percent));
-    jobProgressLabel.textContent = `${label} · ${percent}% · `
-      + `${formatBytes(safeLoaded)} / ${formatBytes(safeTotal)}`;
-  } else {
-    jobBar.style.width = "";
-    jobBar.classList.add("is-unknown");
-    jobTrack.setAttribute("aria-valuenow", "0");
-    jobProgressLabel.textContent = `${label} · ${formatBytes(safeLoaded)}`;
-  }
-  jobStatus.textContent = "";
+  // Callers still pass Uploading / Resuming / Reconnecting as `label`. The
+  // visible text comes from StageModel; the word only guards activity polls.
+  setFeedback({
+    saving: true,
+    failed: false,
+    failMessage: "",
+    activityLabel: String(label || ""),
+    received: safeLoaded,
+    total: safeTotal,
+  });
 }
 
 function fileFingerprint(blob, filename) {
@@ -898,7 +1043,6 @@ async function uploadChunkedToLibrary(blob, filename) {
 
   throwIfUploadCancelled();
   showClientProgress(blob.size, blob.size, "Uploaded", true);
-  jobProgressLabel.textContent = "Saving on this computer…";
   return fetchJson(`/api/uploads/${created.id}/save`, {
     method: "POST",
     body: (() => {
@@ -1026,7 +1170,6 @@ function uploadToLibrary(blob, filename) {
     xhr.upload.onload = () => {
       uploadDone = true;
       showClientProgress(blob.size || 1, blob.size || 1, "Uploaded", true);
-      jobProgressLabel.textContent = "Saving on this computer…";
     };
 
     xhr.onload = () => {
@@ -1325,9 +1468,15 @@ async function applyRecordingLanguages() {
   });
   if (outcome === "blocked") return;
   applyLanguages.disabled = true;
-  detailStatus.textContent = onlyTranslate
-    ? "Translating on this computer…"
-    : "Transcribing on this computer… long recordings can take 30–90+ minutes on CPU";
+  detailStatus.textContent = "";
+  setFeedback({
+    clientJobActive: true,
+    activityActive: true,
+    activityPhase: onlyTranslate ? "translate" : "transcribe",
+    activityLabel: "",
+    failed: false,
+    failMessage: "",
+  });
   startWatch("detail");
   try {
     const audioSource = transcriptAudioSelect ? transcriptAudioSelect.value : "original";
@@ -1347,7 +1496,12 @@ async function applyRecordingLanguages() {
     );
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      detailStatus.textContent = "";
+      setFeedback({
+        clientJobActive: false,
+        activityActive: false,
+        failed: true,
+        failMessage: messageFrom(payload, "This recording was not updated"),
+      });
       await ask({
         title: "This recording was not updated",
         body: messageFrom(payload, "The languages were not updated."),
@@ -1355,10 +1509,14 @@ async function applyRecordingLanguages() {
       });
       return;
     }
-    detailStatus.textContent = "Saved.";
     applyRecordingPayload(payload);
   } catch (_error) {
-    detailStatus.textContent = "";
+    setFeedback({
+      clientJobActive: false,
+      activityActive: false,
+      failed: true,
+      failMessage: "The page lost contact with this computer.",
+    });
     await ask({
       title: "This recording was not updated",
       body: "The page lost contact with this computer.",
@@ -1366,6 +1524,7 @@ async function applyRecordingLanguages() {
     });
   } finally {
     stopWatch();
+    setFeedback({ clientJobActive: false });
     applyLanguages.disabled = false;
     refreshDownloads();
   }
@@ -1732,9 +1891,14 @@ function startWatch(target) {
 function stopWatch() {
   window.clearInterval(watchTimer);
   watchGeneration += 1;
-  hideProgress(jobProgress, jobBar, jobTrack);
-  hideProgress(detailProgress, detailBar, detailTrack);
-  document.body.classList.remove("is-downloading");
+  const keepBytes = feedbackState.saving;
+  setFeedback({
+    activityActive: false,
+    activityPhase: "",
+    activityLabel: "",
+    received: keepBytes ? feedbackState.received : 0,
+    total: keepBytes ? feedbackState.total : 0,
+  });
 }
 
 async function pollActivity(target, generation) {
@@ -1752,80 +1916,47 @@ async function pollActivity(target, generation) {
     if (generation !== watchGeneration) return;
     paintActivity(payload, statusEl, box, track, bar, labelEl);
   } catch (_error) {
-    // Keep the moving bar while the server is busy with Whisper.
+    // Keep a moving bar while the server is busy with Whisper.
     if (generation !== watchGeneration) return;
-    if (box.hidden) {
-      box.hidden = false;
-      document.body.classList.add("is-downloading");
-      bar.style.width = "";
-      bar.classList.add("is-unknown");
-      track.setAttribute("aria-valuenow", "0");
-    }
-    if (labelEl && !/^(Uploading|Resuming|Reconnecting|Connection blip)/.test(labelEl.textContent || "")) {
-      labelEl.textContent =
-        "Transcribing on this computer… long recordings can take 30–90+ minutes on CPU";
+    if (feedbackState.saving) return;
+    if (!feedbackState.activityActive) {
+      setFeedback({
+        activityActive: true,
+        activityPhase: "transcribe",
+        activityLabel: "",
+      });
     }
   } finally {
     window.clearTimeout(timer);
   }
 }
 
-function paintActivity(payload, statusEl, box, track, bar, labelEl) {
-  // Keep client-side upload progress until the server reports a real phase.
-  const labelText = String((labelEl && labelEl.textContent) || "");
-  const clientUpload = /^(Uploading|Resuming|Reconnecting|Connection blip)/.test(labelText);
-  if (clientUpload) {
-    if (!payload.active) return;
+function paintActivity(payload, _statusEl, _box, _track, _bar, labelEl) {
+  // Keep client upload bytes until the server reports a real phase.
+  const labelText = String((labelEl && labelEl.textContent) || feedbackState.activityLabel || "");
+  const clientUpload = /^(Uploading|Resuming|Reconnecting|Connection blip|Saving)/.test(labelText);
+  if (clientUpload && feedbackState.saving && !payload.active) return;
+  const next = {
+    activityActive: Boolean(payload.active),
+    activityPhase: payload.active ? String(payload.phase || "") : "",
+    activityLabel: String(payload.label || ""),
+  };
+  // Saving and download share received/total. Leave the upload ratio in place
+  // while this client is still sending the file.
+  if (!feedbackState.saving) {
+    next.received = Number(payload.received) || 0;
+    next.total = Number(payload.total) || 0;
   }
-  if (!payload.active) {
-    hideProgress(box, bar, track);
-    document.body.classList.remove("is-downloading");
-    return;
-  }
-  if (payload.phase === "transcribe" || payload.phase === "translate") {
-    box.hidden = false;
-    document.body.classList.add("is-downloading");
-    bar.style.width = "";
-    bar.classList.add("is-unknown");
-    track.setAttribute("aria-valuenow", "0");
-    labelEl.textContent = payload.phase === "translate"
-      ? "Translating on this computer…"
-      : "Transcribing on this computer… long recordings can take 30–90+ minutes on CPU";
-    statusEl.textContent = "";
-    return;
-  }
-  if (payload.phase !== "download") {
-    hideProgress(box, bar, track);
-    document.body.classList.remove("is-downloading");
-    return;
-  }
-  box.hidden = false;
-  document.body.classList.add("is-downloading");
-  const total = Number(payload.total) || 0;
-  const received = Number(payload.received) || 0;
-  if (total > 0) {
-    const ratio = Math.max(0, Math.min(1, received / total));
-    const percent = Math.round(ratio * 100);
-    bar.style.width = `${percent}%`;
-    bar.classList.remove("is-unknown");
-    labelEl.textContent = `${payload.label} · ${percent}% · `
-      + `${formatBytes(received)} / ${formatBytes(total)}`;
-    track.setAttribute("aria-valuenow", String(percent));
-  } else {
-    bar.style.width = "";
-    bar.classList.add("is-unknown");
-    labelEl.textContent = payload.label || "Downloading";
-    track.setAttribute("aria-valuenow", "0");
-  }
-  statusEl.textContent = "";
+  setFeedback(next);
 }
 
-function hideProgress(box, bar, track) {
+function hideProgress(box, bar, track, options) {
   box.hidden = true;
   bar.style.width = "0%";
   bar.classList.remove("is-unknown");
   track.setAttribute("aria-valuenow", "0");
-  if (box === jobProgress) setCancelUploadVisible(false);
+  const clearCancel = !options || options.clearCancel !== false;
+  if (clearCancel && box === jobProgress) setCancelUploadVisible(false);
 }
 
 function formatBytes(bytes) {
@@ -2079,18 +2210,45 @@ function updateDetailMixerActions() {
   if (discardButton) discardButton.disabled = !hasCleaned && !previewBlob;
 }
 
+let detailPlaneToken = 0;
+
+async function decodeOriginalAudio() {
+  if (!originalAudioUrl) return null;
+  const response = await fetch(originalAudioUrl);
+  if (!response.ok) throw new Error("fetch failed");
+  const raw = await response.arrayBuffer();
+  const context = new AudioContext();
+  try {
+    return await context.decodeAudioData(raw.slice(0));
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
+async function paintDetailOriginalPlane() {
+  if (!currentId || !originalAudioUrl) return;
+  const token = ++detailPlaneToken;
+  try {
+    const decoded = await decodeOriginalAudio();
+    if (!decoded || token !== detailPlaneToken || currentId == null) return;
+    // Same buffer for both until filter preview finishes — still shows grey+green.
+    paintOfflinePlane(decoded, decoded);
+  } catch (_error) {
+    // Keep the empty plane; filter preview may still succeed.
+  }
+}
+
 async function previewCleanedAudio(options = {}) {
   if (!currentId || !originalAudioUrl) return;
   const quiet = Boolean(options.quiet);
+  const token = ++detailPlaneToken;
   if (!quiet) detailStatus.textContent = "Cleaning audio…";
   try {
-    const response = await fetch(originalAudioUrl);
-    if (!response.ok) throw new Error("fetch failed");
-    const raw = await response.arrayBuffer();
-    const context = new AudioContext();
-    const decoded = await context.decodeAudioData(raw.slice(0));
-    await context.close();
+    const decoded = await decodeOriginalAudio();
+    if (!decoded || token !== detailPlaneToken) return;
+    paintOfflinePlane(decoded, decoded);
     const rendered = await AudioMixer.processBuffer(decoded, mixerSettings);
+    if (token !== detailPlaneToken || currentId == null) return;
     clearPreview();
     previewBlob = AudioMixer.bufferToWavBlob(rendered);
     previewUrl = URL.createObjectURL(previewBlob);
@@ -2126,23 +2284,25 @@ function paintOfflinePlane(rawBuffer, processedBuffer) {
   const processed = processedBuffer.numberOfChannels
     ? processedBuffer.getChannelData(0)
     : raw;
-  const points = 512;
-  const rawOut = new Float32Array(points);
-  const procOut = new Float32Array(points);
+  const points = 640;
+  const rawOut = AudioMixer.peakEnvelope(raw, points);
+  const procOut = AudioMixer.peakEnvelope(processed, points);
+  let rawSum = 0;
+  let procSum = 0;
   for (let i = 0; i < points; i += 1) {
-    const ri = Math.min(raw.length - 1, Math.floor((i / points) * raw.length));
-    const pi = Math.min(processed.length - 1, Math.floor((i / points) * processed.length));
-    rawOut[i] = raw[ri];
-    procOut[i] = processed[pi];
+    rawSum += rawOut[i] * rawOut[i];
+    procSum += procOut[i] * procOut[i];
   }
   view.els.plane.draw({
     raw: rawOut,
     processed: procOut,
-    rawRms: Math.sqrt(rawOut.reduce((s, v) => s + v * v, 0) / points),
-    processedRms: Math.sqrt(procOut.reduce((s, v) => s + v * v, 0) / points),
+    rawRms: Math.sqrt(rawSum / points),
+    processedRms: Math.sqrt(procSum / points),
     gain: mixerSettings.gain,
     gate: 1,
   });
+  // Detail was often hidden when the canvas first sized; redraw after layout.
+  requestAnimationFrame(() => view.els.plane.redraw());
 }
 
 async function saveCleanedAudio() {

@@ -357,6 +357,7 @@
   function createSignalPlane(canvas) {
     const ctx = canvas.getContext("2d");
     let hover = null;
+    let lastFrame = null;
 
     canvas.addEventListener("pointermove", (event) => {
       const rect = canvas.getBoundingClientRect();
@@ -364,25 +365,38 @@
         x: (event.clientX - rect.left) / rect.width,
         y: (event.clientY - rect.top) / rect.height,
       };
+      if (lastFrame) draw(lastFrame);
     });
     canvas.addEventListener("pointerleave", () => {
       hover = null;
+      if (lastFrame) draw(lastFrame);
     });
 
     function resize() {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
+      // Hidden panels report 0×0; keep prior bitmap until the view is laid out.
+      if (rect.width < 2 || rect.height < 2) {
+        return {
+          width: Math.max(1, canvas.width),
+          height: Math.max(1, canvas.height),
+          dpr,
+          skipped: true,
+        };
+      }
       const width = Math.max(1, Math.floor(rect.width * dpr));
       const height = Math.max(1, Math.floor(rect.height * dpr));
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
       }
-      return { width, height, dpr };
+      return { width, height, dpr, skipped: false };
     }
 
     function draw(frame) {
-      const { width, height } = resize();
+      if (frame) lastFrame = frame;
+      const { width, height, skipped } = resize();
+      if (skipped && (!canvas.width || !canvas.height)) return;
       const raw = frame && frame.raw;
       const processed = frame && frame.processed;
       ctx.clearRect(0, 0, width, height);
@@ -424,93 +438,112 @@
       const mid = height / 2;
       const amp = height * 0.42;
       const step = Math.max(1, Math.floor(raw.length / width));
-
-      // Raw envelope fill (input)
-      ctx.beginPath();
-      ctx.moveTo(0, mid);
+      const rawEnv = new Float32Array(width);
+      const procEnv = new Float32Array(width);
+      // Peak per column so live frames read as a moving meter, not a thin bipolar line.
+      let maxPeak = 0;
       for (let x = 0; x < width; x += 1) {
-        const i = Math.min(raw.length - 1, x * step);
-        const y = mid - raw[i] * amp;
-        ctx.lineTo(x, y);
+        const start = Math.min(raw.length - 1, x * step);
+        const end = Math.min(raw.length, start + step);
+        let rawPeak = 0;
+        let procPeak = 0;
+        for (let i = start; i < end; i += 1) {
+          rawPeak = Math.max(rawPeak, Math.abs(raw[i]));
+          const pi = Math.min(processed.length - 1, i);
+          procPeak = Math.max(procPeak, Math.abs(processed[pi]));
+        }
+        rawEnv[x] = rawPeak;
+        procEnv[x] = procPeak;
+        maxPeak = Math.max(maxPeak, rawPeak, procPeak);
+      }
+      // Quiet clips otherwise look like an empty grey canvas.
+      const boost = maxPeak > 0.0005 && maxPeak < 0.2 ? 0.85 / maxPeak : 1;
+      if (boost !== 1) {
+        for (let x = 0; x < width; x += 1) {
+          rawEnv[x] = Math.min(1, rawEnv[x] * boost);
+          procEnv[x] = Math.min(1, procEnv[x] * boost);
+        }
+      }
+
+      function fillSymmetric(envelope, style) {
+        ctx.beginPath();
+        ctx.moveTo(0, mid);
+        for (let x = 0; x < width; x += 1) {
+          ctx.lineTo(x, mid - envelope[x] * amp);
+        }
+        for (let x = width - 1; x >= 0; x -= 1) {
+          ctx.lineTo(x, mid + envelope[x] * amp);
+        }
+        ctx.closePath();
+        ctx.fillStyle = style;
+        ctx.fill();
+      }
+
+      // Raw (grey) — full symmetric envelope. Old draw used 0.15× under the mid
+      // line, so grey vanished under the full-scale green stroke.
+      fillSymmetric(rawEnv, "rgba(156, 145, 128, 0.55)");
+
+      // Removed (coral) — band where filters/gate cut level (|raw| > |processed|).
+      ctx.beginPath();
+      ctx.moveTo(0, mid - rawEnv[0] * amp);
+      for (let x = 0; x < width; x += 1) {
+        ctx.lineTo(x, mid - rawEnv[x] * amp);
       }
       for (let x = width - 1; x >= 0; x -= 1) {
-        const i = Math.min(raw.length - 1, x * step);
-        const y = mid + Math.abs(raw[i]) * amp * 0.15;
-        ctx.lineTo(x, y);
+        const kept = Math.min(rawEnv[x], procEnv[x]);
+        ctx.lineTo(x, mid - kept * amp);
       }
       ctx.closePath();
-      ctx.fillStyle = "rgba(156, 145, 128, 0.35)";
+      ctx.fillStyle = "rgba(196, 92, 62, 0.55)";
       ctx.fill();
 
-      // Suppression overlay = energy removed / attenuated (|raw| - |processed|)
       ctx.beginPath();
-      let started = false;
+      ctx.moveTo(0, mid + Math.min(rawEnv[0], procEnv[0]) * amp);
       for (let x = 0; x < width; x += 1) {
-        const i = Math.min(raw.length - 1, x * step);
-        const removed = Math.max(0, Math.abs(raw[i]) - Math.abs(processed[i]));
-        const yTop = mid - Math.abs(raw[i]) * amp;
-        const yBot = mid - Math.max(0, Math.abs(raw[i]) - removed) * amp;
-        if (!started) {
-          ctx.moveTo(x, yTop);
-          started = true;
-        } else {
-          ctx.lineTo(x, yTop);
-        }
-        if (x === width - 1) {
-          for (let xx = width - 1; xx >= 0; xx -= 1) {
-            const ii = Math.min(raw.length - 1, xx * step);
-            const rem = Math.max(0, Math.abs(raw[ii]) - Math.abs(processed[ii]));
-            const yb = mid - Math.max(0, Math.abs(raw[ii]) - rem) * amp;
-            ctx.lineTo(xx, yb);
-          }
-        }
+        const kept = Math.min(rawEnv[x], procEnv[x]);
+        ctx.lineTo(x, mid + kept * amp);
+      }
+      for (let x = width - 1; x >= 0; x -= 1) {
+        ctx.lineTo(x, mid + rawEnv[x] * amp);
       }
       ctx.closePath();
-      ctx.fillStyle = "rgba(196, 92, 62, 0.45)";
+      ctx.fillStyle = "rgba(196, 92, 62, 0.4)";
       ctx.fill();
 
-      // Mirror suppression under zero for symmetry
-      ctx.beginPath();
-      started = false;
-      for (let x = 0; x < width; x += 1) {
-        const i = Math.min(raw.length - 1, x * step);
-        const removed = Math.max(0, Math.abs(raw[i]) - Math.abs(processed[i]));
-        const yTop = mid + Math.max(0, Math.abs(raw[i]) - removed) * amp;
-        const yBot = mid + Math.abs(raw[i]) * amp;
-        if (!started) {
-          ctx.moveTo(x, yTop);
-          started = true;
-        } else ctx.lineTo(x, yTop);
-        if (x === width - 1) {
-          for (let xx = width - 1; xx >= 0; xx -= 1) {
-            const ii = Math.min(raw.length - 1, xx * step);
-            ctx.lineTo(xx, mid + Math.abs(raw[ii]) * amp);
-          }
-        }
-      }
-      ctx.closePath();
-      ctx.fillStyle = "rgba(196, 92, 62, 0.28)";
-      ctx.fill();
-
-      // Processed waveform (what is recorded)
+      // Processed / recorded (green) — fill + stroke at the same scale as raw.
+      fillSymmetric(procEnv, "rgba(61, 186, 140, 0.28)");
       ctx.beginPath();
       for (let x = 0; x < width; x += 1) {
-        const i = Math.min(processed.length - 1, x * step);
-        const y = mid - processed[i] * amp;
+        const y = mid - procEnv[x] * amp;
         if (x === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
+      for (let x = width - 1; x >= 0; x -= 1) {
+        ctx.lineTo(x, mid + procEnv[x] * amp);
+      }
+      ctx.closePath();
       ctx.strokeStyle = "#3dba8c";
       ctx.lineWidth = Math.max(1.5, width / 500);
+      ctx.stroke();
+
+      // Raw outline so grey stays readable when gain boosts past the input.
+      ctx.beginPath();
+      for (let x = 0; x < width; x += 1) {
+        const y = mid - rawEnv[x] * amp;
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = "rgba(196, 186, 168, 0.9)";
+      ctx.lineWidth = Math.max(1, width / 700);
       ctx.stroke();
 
       // Hover readout
       if (hover) {
         const hx = clamp(hover.x, 0, 1) * (width - 1);
-        const i = Math.min(raw.length - 1, Math.floor((hx / width) * raw.length));
-        const rawV = raw[i];
-        const procV = processed[i];
-        const removed = Math.max(0, Math.abs(rawV) - Math.abs(procV));
+        const xi = Math.min(width - 1, Math.floor(hx));
+        const rawV = rawEnv[xi];
+        const procV = procEnv[xi];
+        const removed = Math.max(0, rawV - procV);
         ctx.strokeStyle = "rgba(243,239,230,0.55)";
         ctx.beginPath();
         ctx.moveTo(hx, 0);
@@ -536,10 +569,33 @@
     }
 
     function idle() {
+      lastFrame = null;
       draw(null);
     }
 
-    return { draw, idle };
+    function redraw() {
+      draw(lastFrame);
+    }
+
+    return { draw, idle, redraw };
+  }
+
+  /** Peak envelope for offline / whole-file meters (single samples look empty). */
+  function peakEnvelope(channelData, points) {
+    const count = Math.max(1, points | 0);
+    const out = new Float32Array(count);
+    if (!channelData || !channelData.length) return out;
+    const block = Math.max(1, Math.floor(channelData.length / count));
+    for (let i = 0; i < count; i += 1) {
+      const start = i * block;
+      const end = Math.min(channelData.length, start + block);
+      let peak = 0;
+      for (let j = start; j < end; j += 1) {
+        peak = Math.max(peak, Math.abs(channelData[j]));
+      }
+      out[i] = peak;
+    }
+    return out;
   }
 
   function paintLegend(ctx, width, height, stats) {
@@ -582,5 +638,6 @@
     bufferToWavBlob,
     readLevel,
     createSignalPlane,
+    peakEnvelope,
   };
 })(window);

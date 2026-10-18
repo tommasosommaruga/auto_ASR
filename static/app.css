@@ -8,7 +8,12 @@
   --accent: #0f6e56;
   --accent-ink: #ffffff;
   --danger: #8d2f23;
-  --dock: 248px;
+  --dock: 280px;
+  --stage-current: var(--accent);
+  --badge-pending-bg: #f3e6d8;
+  --badge-pending-ink: #7a4b1e;
+  --badge-ready-bg: #e2efe9;
+  --badge-ready-ink: #0f6e56;
 }
 
 * { box-sizing: border-box; }
@@ -30,16 +35,16 @@ body.is-detail {
 }
 
 body.is-downloading:not(.is-detail) {
-  --dock: 300px;
+  --dock: 336px;
 }
 
 body.is-recording:not(.is-detail),
 body.is-mixer-open:not(.is-detail) {
-  --dock: 420px;
+  --dock: 456px;
 }
 
 body.is-recording.is-mixer-open:not(.is-detail) {
-  --dock: 520px;
+  --dock: 556px;
 }
 
 main { max-width: 40rem; margin: 0 auto; }
@@ -120,7 +125,12 @@ input, select {
 
 #settings-sheet, #detail-view { padding: 16px; }
 
-#settings-form, #detail-view { display: grid; gap: 12px; }
+#settings-form { display: grid; gap: 12px; }
+
+#detail-view {
+  display: grid;
+  gap: 10px;
+}
 
 .hint, .status, .active-model, .empty {
   margin: 0;
@@ -186,6 +196,48 @@ input, select {
   overflow: hidden;
 }
 
+.recording-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recording-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.recording-badge {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font: 600 0.7rem/1.2 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.recording-badge.is-pending {
+  background: var(--badge-pending-bg);
+  color: var(--badge-pending-ink);
+}
+
+.recording-badge.is-ready {
+  background: var(--badge-ready-bg);
+  color: var(--badge-ready-ink);
+}
+
+.library-job-banner {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+  font: 0.92rem/1.35 ui-sans-serif, system-ui, sans-serif;
+}
+
+.library-job-banner[hidden] { display: none; }
+
 .empty { margin-top: 28px; }
 
 .detail-bar, .result-bar, .dock-row {
@@ -205,6 +257,35 @@ input, select {
   background: transparent;
   font: 650 1.45rem/1.25 "Iowan Old Style", Palatino, Georgia, serif;
 }
+
+#detail-view > .detail-bar { order: 0; }
+#detail-view > .title-input { order: 1; }
+#detail-view > #detail-stage { order: 2; }
+#detail-view > #detail-progress { order: 3; }
+#detail-view > #detail-meta {
+  order: 4;
+  font-size: 0.86rem;
+  color: color-mix(in srgb, var(--muted) 92%, var(--ink));
+}
+#detail-view > .lang-row { order: 5; }
+#detail-view > #apply-languages { order: 6; }
+#detail-view > .audio-source-row { order: 7; }
+#detail-view > #detail-mixer { order: 8; }
+#detail-view > #player { order: 9; }
+#detail-view > p.hint:not(#detail-meta) { order: 10; }
+#detail-view > .result-bar { order: 11; }
+#detail-view > #diarization-note { order: 12; }
+#detail-view > #empty-transcript { order: 13; }
+#detail-view > #detail-status { order: 14; }
+#detail-view > #turns { order: 15; }
+
+.detail-stage {
+  margin: 0;
+  font: 600 0.95rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
+}
+
+.detail-stage:empty { display: none; }
 
 audio { width: 100%; }
 
@@ -322,6 +403,10 @@ audio { width: 100%; }
 .mixer-detail {
   margin: 0;
   padding: 0;
+}
+
+body.is-recording:not(.is-detail) .mixer-dock .signal-plane-wrap {
+  min-height: 96px;
 }
 
 .signal-plane-wrap {
@@ -522,6 +607,9 @@ audio { width: 100%; }
   left: 0;
   right: 0;
   bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding:
     10px
     calc(16px + env(safe-area-inset-right))
@@ -530,6 +618,41 @@ audio { width: 100%; }
   background: rgb(243 239 230 / 0.94);
   border-top: 1px solid var(--line);
   backdrop-filter: blur(10px);
+}
+
+.stage-strip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 40rem;
+  width: 100%;
+  margin: 0 auto;
+  font: 600 0.72rem/1.2 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.stage-step {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+}
+
+.stage-step.is-current {
+  color: var(--stage-current);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+}
+
+.stage-label:empty { display: none; }
+
+.stage-label {
+  max-width: 40rem;
+  width: 100%;
+  margin: 0 auto 4px;
+  font: 0.9rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
 }
 
 #dock .dock-row {

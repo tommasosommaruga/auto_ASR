@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f3efe6">
   <title>auto ASR</title>
-  <link rel="stylesheet" href="/static/app.css?v=26">
+  <link rel="stylesheet" href="/static/app.css?v=28">
 </head>
 <body>
   <main>
@@ -81,8 +81,9 @@
         <input id="search" type="search" placeholder="Search recordings" autocomplete="off">
       </label>
       <p id="library-status" class="status" role="status"></p>
+      <p id="library-job-banner" class="library-job-banner" hidden role="status"></p>
       <div id="library-list"></div>
-      <p id="empty" class="empty" hidden>No recordings yet. Record a discussion or upload one.</p>
+      <p id="empty" class="empty" hidden>No recordings yet. Record or upload.</p>
     </section>
 
     <section id="detail-view" hidden>
@@ -133,6 +134,7 @@
         Audio is saved. Choose languages if you want, then tap Transcribe.
       </p>
       <p id="detail-status" class="status" role="status"></p>
+      <p id="detail-stage" class="detail-stage" role="status" aria-live="polite"></p>
       <div id="detail-progress" class="progress" hidden>
         <div id="detail-progress-track" class="progress-track" role="progressbar"
           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
@@ -146,6 +148,13 @@
   </main>
 
   <div id="dock">
+    <div id="stage-strip" class="stage-strip" aria-label="Capture stage">
+      <span data-flow="idle" class="stage-step is-current">Idle</span>
+      <span data-flow="recording" class="stage-step">Recording</span>
+      <span data-flow="saving" class="stage-step">Saving</span>
+      <span data-flow="working" class="stage-step">Working</span>
+    </div>
+    <p id="stage-label" class="stage-label" role="status" aria-live="polite"></p>
     <p id="timer" class="timer" hidden>0:00</p>
     <p id="mic-note" class="hint" hidden></p>
     <p id="job-status" class="status" role="status"></p>
@@ -204,7 +213,8 @@
       </div>
     </div>
   </div>
-  <script src="/static/audio-mixer.js?v=26"></script>
-  <script src="/static/app.js?v=26"></script>
+  <script src="/static/stage-model.js?v=28"></script>
+  <script src="/static/audio-mixer.js?v=28"></script>
+  <script src="/static/app.js?v=28"></script>
 </body>
 </html>
