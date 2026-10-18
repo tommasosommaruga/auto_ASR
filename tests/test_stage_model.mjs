@@ -90,6 +90,22 @@ test("activity transcribe is working indeterminate", () => {
   assert.match(out.label, /transcrib/i);
 });
 
+test("activity transcribe with totals is determinate", () => {
+  const out = resolve({
+    ...base(),
+    activityActive: true,
+    activityPhase: "transcribe",
+    activityLabel: "Transcribing · 8% · 581k frames left",
+    received: 50000,
+    total: 643406,
+  });
+  assert.equal(out.flow, "working");
+  assert.equal(out.progress.mode, "determinate");
+  assert.ok(out.progress.ratio > 0.07 && out.progress.ratio < 0.09);
+  assert.match(out.label, /8%/);
+  assert.match(out.label, /frames left/i);
+});
+
 test("item pending and ready", () => {
   assert.equal(resolve({ ...base(), itemPending: true }).item, "pending");
   assert.equal(

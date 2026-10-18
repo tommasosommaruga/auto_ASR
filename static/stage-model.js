@@ -51,8 +51,17 @@
       } else if (phase === "translate") {
         label = "Working · Translating…";
         progress = { mode: "indeterminate", ratio: 0, text: label };
+      } else if (total > 0) {
+        const ratio = Math.max(0, Math.min(1, received / total));
+        const percent = Math.round(ratio * 100);
+        label = activityLabel
+          ? (activityLabel.startsWith("Working") ? activityLabel : `Working · ${activityLabel}`)
+          : `Working · Transcribing · ${percent}%`;
+        progress = { mode: "determinate", ratio, text: label };
       } else {
-        label = "Working · Transcribing…";
+        label = activityLabel
+          ? (activityLabel.startsWith("Working") ? activityLabel : `Working · ${activityLabel}`)
+          : "Working · Transcribing…";
         progress = { mode: "indeterminate", ratio: 0, text: label };
       }
     }

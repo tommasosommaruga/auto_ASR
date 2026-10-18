@@ -38,6 +38,16 @@ def note_at_least(received: int, total: int) -> None:
             _state["total"] = max(int(_state["total"]), new_total)
 
 
+def progress(received: int, total: int, label: str | None = None) -> None:
+    """Update counters without changing phase (unlike note())."""
+    with _lock:
+        _state["active"] = True
+        _state["received"] = max(0, int(received))
+        _state["total"] = max(0, int(total))
+        if label is not None:
+            _state["label"] = str(label)
+
+
 def clear() -> None:
     with _lock:
         _state.update(active=False, phase="idle", label="", received=0, total=0)

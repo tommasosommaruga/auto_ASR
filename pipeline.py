@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import queue
 import tarfile
 import threading
 import time
@@ -23,6 +24,8 @@ from huggingface_hub import snapshot_download, try_to_load_from_cache
 from tqdm.auto import tqdm
 
 import activity
+import audio_chunks
+import parallel_transcribe
 from alignment import SpeakerSpan, TimedText, assign_speakers
 from languages import model_for_language
 from settings_store import load_settings
@@ -127,6 +130,63 @@ class _HubProgress(tqdm):
 
     def _report(self) -> None:
         activity.note_at_least(int(self.n or 0), int(self.total or 0))
+
+
+class _JobProgress(tqdm):
+    """Feed MLX / Whisper frame bars into /api/activity for the web UI."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("name", None)
+        self._last_report = 0.0
+        self._last_pct = -1
+        super().__init__(*args, **kwargs)
+        self._report(force=True)
+
+    def update(self, n=1):
+        shown = super().update(n)
+        self._report()
+        return shown
+
+    def refresh(self, *args, **kwargs):
+        shown = super().refresh(*args, **kwargs)
+        self._report()
+        return shown
+
+    def _report(self, force: bool = False) -> None:
+        total = int(self.total or 0)
+        received = int(self.n or 0)
+        pct = int(100 * received / total) if total else 0
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_report < 0.4
+            and pct == self._last_pct
+            and received < total
+        ):
+            return
+        self._last_report = now
+        self._last_pct = pct
+        if total > 0:
+            left = max(0, total - received)
+            unit = str(self.unit or "").strip() or "steps"
+            label = f"Transcribing · {pct}% · {_format_remaining(left, unit)}"
+        else:
+            label = "Transcribing"
+        activity.progress(received, total, label=label)
+
+
+def _format_remaining(left: int, unit: str) -> str:
+    """Short remainder for the status line (no ETA noise)."""
+    if unit == "frames":
+        if left >= 1000:
+            return f"{left / 1000:.0f}k frames left"
+        return f"{left} frames left"
+    if unit in ("seconds", "s"):
+        mins, secs = divmod(int(left), 60)
+        if mins:
+            return f"{mins}m {secs}s left"
+        return f"{secs}s left"
+    return f"{left} {unit} left"
 
 
 class _DiskProgress:
@@ -401,8 +461,13 @@ def transcribe_file(path: Path, settings: dict, num_speakers: int) -> dict:
     resolved = dict(settings)
     resolved["model"] = model_for_language(settings["model"], requested)
     device, compute = resolve_device(resolved)
+    duration_s = float(audio.shape[0]) / 16000.0
     activity.begin("transcribe", "Transcribing")
-    if device == "mlx":
+    if audio_chunks.should_parallelize(duration_s, device):
+        segments, detected = _transcribe_parallel_ct2(
+            audio, resolved, requested, device, compute
+        )
+    elif device == "mlx":
         segments, detected = _transcribe_mlx(path, resolved, requested)
     else:
         segments, detected = _transcribe_ct2(path, resolved, requested, device, compute)
@@ -429,6 +494,117 @@ def transcribe_file(path: Path, settings: dict, num_speakers: int) -> dict:
         "detected_language": detected or requested,
         "diarization_error": diarization_error,
     }
+
+
+def create_whisper_model(settings: dict, device: str, compute: str) -> WhisperModel:
+    name = settings["model"]
+    if not _ct2_speech_ready(name):
+        raise RuntimeError(
+            f"{name} is not installed on this computer. "
+            "Install it when prompted, or choose an installed model in Settings."
+        )
+    try:
+        return WhisperModel(
+            name,
+            device=device,
+            compute_type=compute,
+            cpu_threads=settings["cpu_threads"],
+            download_root=str(WHISPER_DIR),
+            local_files_only=True,
+            use_auth_token=_hf_token(),
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        message = str(exc)
+        if device == "cuda":
+            raise RuntimeError(
+                "CUDA is not available on this computer. "
+                "Choose auto or cpu in Settings."
+            ) from exc
+        raise RuntimeError(
+            f"Could not load model {name}. {message}"
+        ) from exc
+
+
+def _transcribe_ct2_audio(
+    model: WhisperModel,
+    audio: np.ndarray,
+    requested: str,
+) -> tuple[list[TimedText], str | None]:
+    segments_iter, info = model.transcribe(
+        audio,
+        language=None if requested == "auto" else requested,
+        beam_size=1,
+        vad_filter=True,
+        condition_on_previous_text=False,
+    )
+    segments = [
+        TimedText(start=segment.start, end=segment.end, text=segment.text)
+        for segment in segments_iter
+    ]
+    return segments, getattr(info, "language", None)
+
+
+def _looks_like_cuda_oom(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    if "outofmemory" in name or isinstance(exc, MemoryError):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg
+
+
+def _transcribe_parallel_ct2(
+    audio: np.ndarray,
+    settings: dict,
+    requested: str,
+    device: str,
+    compute: str,
+) -> tuple[list[TimedText], str | None]:
+    chunks = audio_chunks.plan_chunks(audio)
+    threads = int(settings["cpu_threads"])
+    workers = parallel_transcribe.worker_count(device, threads, len(chunks))
+    per_worker_settings = dict(settings)
+    per_worker_settings["cpu_threads"] = max(1, threads // max(1, workers))
+
+    models: list[WhisperModel] = []
+    try:
+        for _ in range(workers):
+            try:
+                models.append(create_whisper_model(per_worker_settings, device, compute))
+            except Exception as exc:
+                if device == "cuda" and models and _looks_like_cuda_oom(exc):
+                    break
+                raise
+        if not models:
+            raise RuntimeError("Could not load the speech model for parallel transcription.")
+        workers = len(models)
+
+        model_q: queue.Queue[WhisperModel] = queue.Queue()
+        for model in models:
+            model_q.put(model)
+
+        def transcribe_fn(samples: np.ndarray):
+            model = model_q.get()
+            try:
+                return _transcribe_ct2_audio(model, samples, requested)
+            finally:
+                model_q.put(model)
+
+        def on_progress(done: int, total: int) -> None:
+            activity.begin("transcribe", f"Transcribing {done}/{total}")
+            activity.progress(done, total)
+
+        return parallel_transcribe.transcribe_chunks(
+            chunks=chunks,
+            audio=audio,
+            sample_rate=audio_chunks.SAMPLE_RATE,
+            worker_n=workers,
+            transcribe_fn=transcribe_fn,
+            on_progress=on_progress,
+        )
+    finally:
+        models.clear()
 
 
 def _transcribe_ct2(
@@ -459,19 +635,26 @@ def _transcribe_mlx(
     requested: str,
 ) -> tuple[list[TimedText], str | None]:
     import mlx_whisper
+    import tqdm as tqdm_mod
 
     name = settings["model"]
     repo = mlx_repo_for(name)
     if not repo:
         raise RuntimeError(f"No Apple GPU model mapping for {name}.")
     ensure_speech_model(name)
-    result = mlx_whisper.transcribe(
-        str(path),
-        path_or_hf_repo=repo,
-        language=None if requested == "auto" else requested,
-        word_timestamps=False,
-        verbose=False,
-    )
+    # mlx_whisper builds tqdm.tqdm(... unit="frames"); route that into activity.
+    previous = tqdm_mod.tqdm
+    tqdm_mod.tqdm = _JobProgress
+    try:
+        result = mlx_whisper.transcribe(
+            str(path),
+            path_or_hf_repo=repo,
+            language=None if requested == "auto" else requested,
+            word_timestamps=False,
+            verbose=False,
+        )
+    finally:
+        tqdm_mod.tqdm = previous
     segments = []
     for row in result.get("segments") or []:
         text = str(row.get("text") or "").strip()
@@ -534,34 +717,7 @@ def _get_whisper(
     with _whisper_lock:
         if _whisper is not None and _whisper_key == key:
             return _whisper, device, compute
-        name = settings["model"]
-        if not _ct2_speech_ready(name):
-            raise RuntimeError(
-                f"{name} is not installed on this computer. "
-                "Install it when prompted, or choose an installed model in Settings."
-            )
-        try:
-            model = WhisperModel(
-                name,
-                device=device,
-                compute_type=compute,
-                cpu_threads=settings["cpu_threads"],
-                download_root=str(WHISPER_DIR),
-                local_files_only=True,
-                use_auth_token=_hf_token(),
-            )
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            message = str(exc)
-            if device == "cuda":
-                raise RuntimeError(
-                    "CUDA is not available on this computer. "
-                    "Choose auto or cpu in Settings."
-                ) from exc
-            raise RuntimeError(
-                f"Could not load model {name}. {message}"
-            ) from exc
+        model = create_whisper_model(settings, device, compute)
         _whisper = model
         _whisper_key = key
         return model, device, compute

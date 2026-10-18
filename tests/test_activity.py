@@ -42,6 +42,25 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(snap["phase"], "idle")
         self.assertEqual(snap["remaining"], 0)
 
+    def test_progress_keeps_transcribe_phase(self):
+        activity.begin("transcribe", "Transcribing 0/4")
+        activity.progress(2, 4)
+        snap = activity.snapshot()
+        self.assertEqual(snap["phase"], "transcribe")
+        self.assertEqual(snap["label"], "Transcribing 0/4")
+        self.assertEqual(snap["received"], 2)
+        self.assertEqual(snap["total"], 4)
+        self.assertEqual(snap["remaining"], 2)
+
+    def test_progress_can_refresh_the_label(self):
+        activity.begin("transcribe", "Transcribing")
+        activity.progress(11200, 643406, label="Transcribing · 2% · 632k frames left")
+        snap = activity.snapshot()
+        self.assertEqual(snap["phase"], "transcribe")
+        self.assertEqual(snap["label"], "Transcribing · 2% · 632k frames left")
+        self.assertEqual(snap["received"], 11200)
+        self.assertEqual(snap["total"], 643406)
+
 
 if __name__ == "__main__":
     unittest.main()
