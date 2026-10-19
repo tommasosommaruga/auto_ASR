@@ -106,6 +106,24 @@ test("activity transcribe with totals is determinate", () => {
   assert.match(out.label, /frames left/i);
 });
 
+test("chunk transcription shows count under the bar", () => {
+  const out = resolve({
+    ...base(),
+    activityActive: true,
+    activityPhase: "transcribe",
+    activityLabel: "Transcribing 16/72 · 22% · ~8m left",
+    received: 16,
+    total: 72,
+  });
+  assert.equal(out.flow, "working");
+  assert.equal(out.progress.mode, "determinate");
+  assert.ok(Math.abs(out.progress.ratio - 16 / 72) < 0.001);
+  assert.match(out.label, /16\/72/);
+  assert.match(out.label, /8m left/);
+  assert.match(out.progress.text, /chunks/i);
+  assert.match(out.progress.text, /22%/);
+});
+
 test("item pending and ready", () => {
   assert.equal(resolve({ ...base(), itemPending: true }).item, "pending");
   assert.equal(

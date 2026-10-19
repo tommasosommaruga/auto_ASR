@@ -47,7 +47,7 @@ class DownloadCatalogTests(unittest.TestCase):
             "compute_type": "int8",
             "cpu_threads": 2,
         }
-        with patch.object(pipeline, "speech_ready", return_value=False):
+        with patch.object(pipeline, "_ct2_speech_ready", return_value=False):
             with patch.object(pipeline, "snapshot_download") as snap:
                 with patch.object(pipeline, "WhisperModel") as whisper:
                     with self.assertRaises(RuntimeError) as raised:

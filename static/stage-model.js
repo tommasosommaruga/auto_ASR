@@ -54,10 +54,22 @@
       } else if (total > 0) {
         const ratio = Math.max(0, Math.min(1, received / total));
         const percent = Math.round(ratio * 100);
-        label = activityLabel
-          ? (activityLabel.startsWith("Working") ? activityLabel : `Working · ${activityLabel}`)
-          : `Working · Transcribing · ${percent}%`;
-        progress = { mode: "determinate", ratio, text: label };
+        // Chunk jobs use small totals; frame bars use huge ones (MLX).
+        const chunkJob = total > 0 && total <= 5000 && !/frames/i.test(activityLabel);
+        if (activityLabel) {
+          label = activityLabel.startsWith("Working")
+            ? activityLabel
+            : `Working · ${activityLabel}`;
+        } else if (chunkJob) {
+          label = `Working · Transcribing · ${received}/${total} · ${percent}%`;
+        } else {
+          label = `Working · Transcribing · ${percent}%`;
+        }
+        // Compact line under the bar; stage-label keeps the full sentence.
+        const barText = chunkJob
+          ? `${percent}% · ${received}/${total} chunks`
+          : (activityLabel || `${percent}%`);
+        progress = { mode: "determinate", ratio, text: barText };
       } else {
         label = activityLabel
           ? (activityLabel.startsWith("Working") ? activityLabel : `Working · ${activityLabel}`)

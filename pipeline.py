@@ -26,6 +26,7 @@ from tqdm.auto import tqdm
 import activity
 import audio_chunks
 import parallel_transcribe
+import transcribe_checkpoints
 from alignment import SpeakerSpan, TimedText, assign_speakers
 from languages import model_for_language
 from settings_store import load_settings
@@ -170,22 +171,34 @@ class _JobProgress(tqdm):
             left = max(0, total - received)
             unit = str(self.unit or "").strip() or "steps"
             label = f"Transcribing · {pct}% · {_format_remaining(left, unit)}"
+            rate = float(getattr(self, "format_dict", {}).get("rate") or 0)
+            if rate > 0 and left > 0:
+                label = f"{label} · ~{_format_clock(left / rate)} left"
         else:
             label = "Transcribing"
         activity.progress(received, total, label=label)
 
 
+def _format_clock(seconds: float) -> str:
+    """Compact wall-clock remaining, e.g. 1h 05m / 12m 3s / 40s."""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def _format_remaining(left: int, unit: str) -> str:
-    """Short remainder for the status line (no ETA noise)."""
+    """Short remainder for the status line."""
     if unit == "frames":
         if left >= 1000:
             return f"{left / 1000:.0f}k frames left"
         return f"{left} frames left"
     if unit in ("seconds", "s"):
-        mins, secs = divmod(int(left), 60)
-        if mins:
-            return f"{mins}m {secs}s left"
-        return f"{secs}s left"
+        return f"{_format_clock(left)} left"
     return f"{left} {unit} left"
 
 
@@ -462,10 +475,19 @@ def transcribe_file(path: Path, settings: dict, num_speakers: int) -> dict:
     resolved["model"] = model_for_language(settings["model"], requested)
     device, compute = resolve_device(resolved)
     duration_s = float(audio.shape[0]) / 16000.0
+    used_device, used_compute = device, compute
     activity.begin("transcribe", "Transcribing")
     if audio_chunks.should_parallelize(duration_s, device):
+        # Long MLX jobs remapped to CPU CT2 pool — real concurrency + chunk ETA.
+        used_device = "cpu" if device == "mlx" else device
+        used_compute = "int8" if used_device == "cpu" else compute
         segments, detected = _transcribe_parallel_ct2(
-            audio, resolved, requested, device, compute
+            audio,
+            resolved,
+            requested,
+            used_device,
+            used_compute,
+            audio_path=path,
         )
     elif device == "mlx":
         segments, detected = _transcribe_mlx(path, resolved, requested)
@@ -476,6 +498,7 @@ def transcribe_file(path: Path, settings: dict, num_speakers: int) -> dict:
     spans: list[SpeakerSpan] = []
     # Keep the audio even when Whisper finds nothing — empty turns still save.
     if segments:
+        activity.begin("transcribe", "Labeling speakers…")
         try:
             spans = _diarize(audio, num_speakers, settings["cluster_threshold"])
         except Exception as exc:
@@ -488,8 +511,8 @@ def transcribe_file(path: Path, settings: dict, num_speakers: int) -> dict:
         "text": text,
         "duration": round(float(audio.shape[0]) / 16000.0, 2),
         "model": resolved["model"],
-        "device": device,
-        "compute_type": compute,
+        "device": used_device,
+        "compute_type": used_compute,
         "language": requested,
         "detected_language": detected or requested,
         "diarization_error": diarization_error,
@@ -560,6 +583,8 @@ def _transcribe_parallel_ct2(
     requested: str,
     device: str,
     compute: str,
+    *,
+    audio_path: Path | None = None,
 ) -> tuple[list[TimedText], str | None]:
     chunks = audio_chunks.plan_chunks(audio)
     threads = int(settings["cpu_threads"])
@@ -567,8 +592,81 @@ def _transcribe_parallel_ct2(
     per_worker_settings = dict(settings)
     per_worker_settings["cpu_threads"] = max(1, threads // max(1, workers))
 
+    prior: dict[int, tuple[list[TimedText], str | None]] = {}
+    checkpoint_root: Path | None = None
+    fingerprint = ""
+    if audio_path is not None:
+        fingerprint = transcribe_checkpoints.fingerprint(
+            model=str(settings.get("model") or ""),
+            language=str(requested),
+            device=device,
+            compute=compute,
+            audio_path=audio_path,
+            chunks=chunks,
+        )
+        checkpoint_root = transcribe_checkpoints.open_session(
+            audio_path,
+            fingerprint_value=fingerprint,
+            total_chunks=len(chunks),
+        )
+        prior = transcribe_checkpoints.load_completed(checkpoint_root, chunks)
+
+    started = time.monotonic()
+    resumed_from = len(prior)
+
+    def on_progress(done: int, total: int) -> None:
+        percent = int(100 * done / total) if total else 0
+        base = f"Transcribing {done}/{total} · {percent}%"
+        if resumed_from and done < total and done <= resumed_from:
+            label = f"{base} · resumed"
+        elif done > resumed_from and total > done:
+            # ETA from newly finished chunks only (ignore resumed wall time).
+            fresh = done - resumed_from
+            elapsed = time.monotonic() - started
+            eta = elapsed * (total - done) / max(1, fresh)
+            label = f"{base} · ~{_format_clock(eta)} left"
+        else:
+            label = base
+        activity.progress(done, total, label=label)
+
+    def on_chunk_complete(
+        chunk: audio_chunks.AudioChunk,
+        segments: list[TimedText],
+        language: str | None,
+    ) -> None:
+        if checkpoint_root is None:
+            return
+        transcribe_checkpoints.save_chunk(
+            checkpoint_root,
+            chunk,
+            segments,
+            language,
+            fingerprint_value=fingerprint,
+            total_chunks=len(chunks),
+        )
+
+    remaining = len(chunks) - len(prior)
+    if remaining == 0:
+        segments, detected = parallel_transcribe.transcribe_chunks(
+            chunks=chunks,
+            audio=audio,
+            sample_rate=audio_chunks.SAMPLE_RATE,
+            worker_n=1,
+            transcribe_fn=lambda _samples: ([], None),
+            on_progress=on_progress,
+            prior_results=prior,
+        )
+        if audio_path is not None:
+            transcribe_checkpoints.clear(audio_path)
+        return segments, detected
+
     models: list[WhisperModel] = []
     try:
+        activity.begin(
+            "transcribe",
+            f"Loading speech models… ({workers} worker{'s' if workers != 1 else ''})",
+        )
+        activity.progress(len(prior), len(chunks))
         for _ in range(workers):
             try:
                 models.append(create_whisper_model(per_worker_settings, device, compute))
@@ -591,18 +689,19 @@ def _transcribe_parallel_ct2(
             finally:
                 model_q.put(model)
 
-        def on_progress(done: int, total: int) -> None:
-            activity.begin("transcribe", f"Transcribing {done}/{total}")
-            activity.progress(done, total)
-
-        return parallel_transcribe.transcribe_chunks(
+        segments, detected = parallel_transcribe.transcribe_chunks(
             chunks=chunks,
             audio=audio,
             sample_rate=audio_chunks.SAMPLE_RATE,
             worker_n=workers,
             transcribe_fn=transcribe_fn,
             on_progress=on_progress,
+            prior_results=prior,
+            on_chunk_complete=on_chunk_complete,
         )
+        if audio_path is not None:
+            transcribe_checkpoints.clear(audio_path)
+        return segments, detected
     finally:
         models.clear()
 

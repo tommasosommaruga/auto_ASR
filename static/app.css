@@ -651,8 +651,14 @@ body.is-recording:not(.is-detail) .mixer-dock .signal-plane-wrap {
   max-width: 40rem;
   width: 100%;
   margin: 0 auto 4px;
-  font: 0.9rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  font: 0.95rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
   color: var(--ink);
+}
+
+body.is-downloading .stage-label,
+body.is-downloading .detail-stage {
+  font-weight: 600;
 }
 
 #dock .dock-row {
