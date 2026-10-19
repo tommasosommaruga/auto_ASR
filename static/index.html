@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3efe6">
+  <title>auto ASR</title>
+  <link rel="stylesheet" href="/static/app.css?v=30">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">Discussions</p>
+        <h1>auto ASR</h1>
+      </div>
+      <button id="open-settings" type="button">Settings</button>
+    </header>
+
+    <section id="settings-sheet" hidden>
+      <form id="settings-form">
+        <p id="active-model" class="active-model">Loading settings…</p>
+        <div class="lang-row">
+          <label>
+            Spoken language
+            <select id="language" name="language"></select>
+          </label>
+          <button id="swap-languages" type="button" class="swap" aria-label="Swap languages">↔</button>
+          <label>
+            Read in
+            <select id="translate-to" name="translate-to"></select>
+          </label>
+        </div>
+        <p class="hint">
+          New recordings use the Spoken and Read in languages selected here.
+          Only installed speech models and language files can be chosen offline —
+          those options stay available with no download prompts.
+          When this computer is online, missing choices are marked ↓ and can be
+          installed once. An English-only speech model switches to its multilingual
+          version for any other spoken language.
+        </p>
+        <label>
+          Speech model
+          <select id="model" name="model"></select>
+        </label>
+        <label id="custom-wrap" hidden>
+          Model name or folder
+          <input id="custom-model" name="custom-model" type="text" autocomplete="off"
+            placeholder="tiny.en or a local model folder">
+        </label>
+        <label>
+          Device
+          <select id="device" name="device"></select>
+        </label>
+        <label>
+          Compute
+          <select id="compute-type" name="compute-type"></select>
+        </label>
+        <label>
+          CPU threads
+          <input id="cpu-threads" name="cpu-threads" type="number" min="1" max="16" step="1">
+        </label>
+        <label>
+          Speaker threshold
+          <input id="cluster-threshold" name="cluster-threshold" type="number"
+            min="0.1" max="1" step="0.05">
+        </label>
+        <p class="hint">
+          Device <strong>auto</strong> picks the fastest backend on this machine:
+          NVIDIA CUDA, Apple GPU (Metal/MLX), or CPU. You usually leave compute on
+          default. A smaller model is faster. The next transcription uses what you save.
+        </p>
+        <button type="submit">Save settings</button>
+        <p id="settings-status" class="status" role="status"></p>
+      </form>
+    </section>
+
+    <section id="library-view">
+      <label class="search">
+        <span class="visually-hidden">Search recordings</span>
+        <input id="search" type="search" placeholder="Search recordings" autocomplete="off">
+      </label>
+      <p id="library-status" class="status" role="status"></p>
+      <p id="library-job-banner" class="library-job-banner" hidden role="status"></p>
+      <div id="library-list"></div>
+      <p id="empty" class="empty" hidden>No recordings yet. Record or upload.</p>
+    </section>
+
+    <section id="detail-view" hidden>
+      <div class="detail-bar">
+        <button id="back" type="button">Library</button>
+        <button id="delete" type="button">Delete</button>
+      </div>
+      <textarea id="title" class="title-input" rows="2" maxlength="80" aria-label="Title"></textarea>
+      <p id="detail-meta" class="hint"></p>
+      <div class="lang-row">
+        <label>
+          This recording
+          <select id="detail-language"></select>
+        </label>
+        <span class="lang-arrow" aria-hidden="true">→</span>
+        <label>
+          Read in
+          <select id="detail-translate"></select>
+        </label>
+      </div>
+      <button id="apply-languages" type="button">Transcribe</button>
+      <div class="audio-source-row">
+        <label>
+          Use for transcript
+          <select id="transcript-audio">
+            <option value="original">Original</option>
+            <option value="cleaned" disabled>Cleaned (not saved)</option>
+          </select>
+        </label>
+        <label>
+          Listen to
+          <select id="listen-audio">
+            <option value="original">Original</option>
+            <option value="cleaned" disabled>Cleaned</option>
+            <option value="preview" disabled>Preview</option>
+          </select>
+        </label>
+      </div>
+      <div id="detail-mixer" class="mixer" data-mixer="detail"></div>
+      <audio id="player" controls preload="metadata"></audio>
+      <p class="hint">Tap a line to play from there.</p>
+      <div class="result-bar">
+        <h2>Transcript</h2>
+        <button id="copy" type="button">Copy</button>
+      </div>
+      <p id="diarization-note" class="hint" hidden></p>
+      <p id="empty-transcript" class="empty-transcript" hidden>
+        Audio is saved. Choose languages if you want, then tap Transcribe.
+      </p>
+      <p id="detail-status" class="status" role="status"></p>
+      <p id="detail-stage" class="detail-stage" role="status" aria-live="polite"></p>
+      <div id="detail-progress" class="progress" hidden>
+        <div id="detail-progress-track" class="progress-track" role="progressbar"
+          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+          aria-labelledby="detail-progress-label">
+          <div id="detail-progress-bar" class="progress-bar"></div>
+        </div>
+        <p id="detail-progress-label" class="hint"></p>
+      </div>
+      <ol id="turns"></ol>
+    </section>
+  </main>
+
+  <div id="dock">
+    <div id="stage-strip" class="stage-strip" aria-label="Capture stage">
+      <span data-flow="idle" class="stage-step is-current">Idle</span>
+      <span data-flow="recording" class="stage-step">Recording</span>
+      <span data-flow="saving" class="stage-step">Saving</span>
+      <span data-flow="working" class="stage-step">Working</span>
+    </div>
+    <p id="stage-label" class="stage-label" role="status" aria-live="polite"></p>
+    <p id="timer" class="timer" hidden>0:00</p>
+    <p id="mic-note" class="hint" hidden></p>
+    <p id="job-status" class="status" role="status"></p>
+    <div id="job-progress" class="progress" hidden>
+      <div id="job-progress-track" class="progress-track" role="progressbar"
+        aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+        aria-labelledby="job-progress-label">
+        <div id="job-progress-bar" class="progress-bar"></div>
+      </div>
+      <div class="progress-meta">
+        <p id="job-progress-label" class="hint"></p>
+        <button id="cancel-upload" type="button" class="progress-cancel" hidden>Cancel</button>
+      </div>
+    </div>
+    <div class="lang-row dock-langs">
+      <label>
+        Spoken
+        <select id="dock-language"></select>
+      </label>
+      <span class="lang-arrow" aria-hidden="true">→</span>
+      <label>
+        Read in
+        <select id="dock-translate"></select>
+      </label>
+    </div>
+    <div id="dock-mixer" class="mixer mixer-dock" data-mixer="dock"></div>
+    <div class="dock-row">
+      <label class="people">
+        People
+        <select id="num-speakers">
+          <option value="auto">Auto</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+        </select>
+      </label>
+      <button id="record" type="button">Record</button>
+      <button id="stop" type="button" hidden>Stop</button>
+      <label class="file-button">
+        Upload
+        <input id="file" type="file" accept="audio/*,video/mp4,video/webm">
+      </label>
+    </div>
+  </div>
+  <div id="dialog" class="dialog" hidden>
+    <div class="dialog-card" role="dialog" aria-modal="true"
+      aria-labelledby="dialog-title" aria-describedby="dialog-body">
+      <h2 id="dialog-title"></h2>
+      <p id="dialog-body"></p>
+      <ul id="dialog-list" hidden></ul>
+      <div id="dialog-actions" class="dialog-actions">
+        <button id="dialog-cancel" type="button"></button>
+        <button id="dialog-confirm" type="button"></button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/stage-model.js?v=30"></script>
+  <script src="/static/audio-mixer.js?v=30"></script>
+  <script src="/static/app.js?v=30"></script>
+</body>
+</html>

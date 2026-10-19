@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">auto ASR</string>
+    <string name="settings_title">Server</string>
+    <string name="settings_hint">HTTPS address of the computer running auto ASR (Tailscale or Wi‑Fi).</string>
+    <string name="server_url_label">Server URL</string>
+    <string name="save">Save</string>
+    <string name="reload">Reload</string>
+    <string name="open_settings">Server</string>
+    <string name="default_server_url">https://100.79.49.115:8443</string>
+    <string name="mic_permission_needed">Microphone permission is required to record.</string>
+    <string name="cannot_reach_server">Cannot reach the server. Check Tailscale and that the Mac is running:\npython server.py --https</string>
+    <string name="loading">Loading…</string>
+</resources>
