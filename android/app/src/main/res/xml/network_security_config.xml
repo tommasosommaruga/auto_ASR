@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Tailscale / LAN self-signed HTTPS is accepted in WebView via SslErrorHandler.
+         Keep cleartext off; the Python server should run with --https. -->
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

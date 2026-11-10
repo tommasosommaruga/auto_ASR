@@ -1,0 +1,14 @@
+# Built artifacts
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+app/build/
+*.apk
+*.aab
+*.ap_
+*.dex
